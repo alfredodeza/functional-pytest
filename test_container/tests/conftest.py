@@ -1,14 +1,10 @@
-import json
-import os
-from os.path import dirname as _dir
-import random
-import string
-import time
+from utils import call, create_client, ExitCode
+# This is not ideal, but it is fine for demo purposes
+from hooks import *
 import logging
-import subprocess
+import time
 
 import docker
-from docker.errors import DockerException
 import pytest
 
 
@@ -16,56 +12,13 @@ def get_logger(name):
     return logging.getLogger('conftest.%s' % name)
 
 
-def pytest_sessionstart(session):
-    BASE_FORMAT = "[%(name)s][%(levelname)-6s] %(message)s"
-    FILE_FORMAT = "[%(asctime)s]" + BASE_FORMAT
-
-    root_logger = logging.getLogger('conftest')
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    top_level = _dir(_dir(dir_path))
-    log_file = os.path.join(top_level, 'pytest-functional-tests.log')
-
-    root_logger.setLevel(logging.DEBUG)
-
-    # File Logger
-    fh = logging.FileHandler(log_file)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter(FILE_FORMAT, "%Y-%m-%d %H:%M:%S"))
-
-    root_logger.addHandler(fh)
-
-
-def create_client():
-    logger = get_logger('create_client')
-    try:
-        c = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto")
-        # XXX ?
-        c.run = run(c)
-        return c
-    except DockerException as e:
-        logger.exception('Unable to connect to a docker socket')
-        raise pytest.UsageError("Could not connect to a running docker socket: %s" % str(e))
-
-
 @pytest.fixture(scope='session')
 def client():
     return create_client()
 
 
-def pytest_assertrepr_compare(op, left, right):
-    if isinstance(left, ExitCode) and isinstance(right, ExitCode):
-        return [
-            "failure ExitCode(%s) %s ExitCode(%s)" % (left, op, right),
-            "Exit status assertion failure, stdout and stderr context:",
-            ] + [
-            '   stdout: %s' % line for line in left.stdout.split('\n')
-            ] + [
-            '   stderr: %s' % line for line in left.stderr.split('\n')
-        ]
-
-
 @pytest.fixture(scope='session', autouse=True)
-def inline_scan(client, request):
+def local_container(client, request):
     image = 'localbuild:flask'
     container = start_container(
         client,
@@ -126,7 +79,7 @@ def start_container(client, image, name, environment, ports, detach=True):
         out, err, code = call(
             ['curl', 'localhost:5000'],
         )
-        if code == 0:
+        if code == ExitCode(0):
             # This path needs to be hit when the container is ready to be
             # used, if this is not reached, then an error needs to bubble
             # up
@@ -154,101 +107,11 @@ def remove_container(client, container_name):
             test_container.remove()
 
 
-def run(client):
-    def run_command(container_id, command):
-        created_command = client.exec_create(container_id, cmd=command)
-        result = client.exec_start(created_command)
-        exit_code = client.exec_inspect(created_command)['ExitCode']
-        if exit_code != 0:
-            msg = 'Non-zero exit code (%d) for command: %s' % (exit_code, command)
-            raise(AssertionError(result), msg)
-        return result
-    return run_command
+@pytest.fixture
+def run():
 
-
-class ExitCode(int):
-    """
-    For rich comparison in Pytest, the objects being compared can be
-    introspected to provide more context to a failure. The idea here is that
-    when the exit code is not expected, a custom Pytest hook can provide the
-    `stderr` and `stdout` aside from just the exit code. The normal `int`
-    behavior is preserved.
-    """
-    def __init__(self, code):
-        self.code = code
-        self.stderr = ''
-        self.stdout = ''
-
-
-def call(command, **kw):
-    """
-    Similar to ``subprocess.Popen`` with the following changes:
-
-    * returns stdout, stderr, and exit code (vs. just the exit code)
-    * logs the full contents of stderr and stdout (separately) to the file log
-
-    By default, no terminal output is given, not even the command that is going
-    to run.
-
-    Useful when system calls are needed to act on output, and that same output
-    shouldn't get displayed on the terminal.
-
-    :param terminal_verbose: Log command output to terminal, defaults to False, and
-                             it is forcefully set to True if a return code is non-zero
-    :param split: Instead of returning output as a long string, split on newlines, and then also
-                  split on whitespace. Useful when output keeps changing when tabbing on custom
-                  lengths
-    """
-    logger = get_logger('call')
-    stdout = get_logger('call.stdout')
-    stderr = get_logger('call.stderr')
-    log_verbose = kw.pop('log_verbose', False)
-    command_msg = "Running command: %s" % ' '.join(command)
-    logger.info(command_msg)
-    env = kw.pop('env', None)
-    split = kw.pop('split', False)
-    existing_env = os.environ.copy()
-    if env:
-        for key, value in env.items():
-            existing_env[key] = value
-
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.PIPE,
-        close_fds=True,
-        env=existing_env,
-        **kw
-    )
-    stdout_stream = process.stdout.read()
-    stderr_stream = process.stderr.read()
-    returncode = process.wait()
-    if not isinstance(stdout_stream, str):
-        stdout_stream = stdout_stream.decode('utf-8')
-    if not isinstance(stderr_stream, str):
-        stderr_stream = stderr_stream.decode('utf-8')
-
-    if returncode != 0:
-        # set to true so that we can log the stderr/stdout that callers would
-        # do anyway
-        log_verbose = True
-
-    # the following can get a messed up order in the log if the system call
-    # returns output with both stderr and stdout intermingled. This separates
-    # that.
-    if log_verbose:
-        for line in stdout_stream.splitlines():
-            stdout.info(line)
-        for line in stderr_stream.splitlines():
-            stderr.info(line)
-
-    returncode = ExitCode(returncode)
-    returncode.stderr = stderr_stream
-    returncode.stdout = stdout_stream
-
-    if split:
-        stdout_stream = [line.split() for line in stdout_stream.split('\n')]
-        stderr_stream = [line.split() for line in stderr_stream.split('\n')]
-
-    return stdout_stream, stderr_stream, returncode
+    def _run(command):
+        out, err, code = call(command)
+        # code will have out and err on it already
+        return code
+    return _run
