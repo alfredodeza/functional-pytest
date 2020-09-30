@@ -1,6 +1,6 @@
 from utils import call, create_client, ExitCode
 # This is not ideal, but it is fine for demo purposes
-from hooks import *
+#from hooks import *
 import logging
 import time
 
