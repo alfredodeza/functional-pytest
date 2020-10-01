@@ -69,10 +69,11 @@ def pytest_report_header(config):
         msg = ['Docker: Unable to connect to a docker socket']
         msg.append('Error: %s' % str(e))
         return msg
-
     config = metadata['Config']
+    #labels = config.get('Labels', {})
 
     msg.extend([
+       #'   %s: %s' % (k, v) for k, v in labels.items()
        '    DOCKER>> %s: %s' % (k, v) for k, v in config.items()
     ])
 
